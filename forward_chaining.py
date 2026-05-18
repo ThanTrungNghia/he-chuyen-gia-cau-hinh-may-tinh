@@ -1,18 +1,14 @@
 """
 forward_chaining.py — Forward Chaining wrapper với phân bổ ngân sách
 =====================================================================
-Nguồn lý thuyết:
-  - UNIT_10 (Suy luận diễn dịch / Deductive Reasoning)
-  - UNIT_11 (Modus Ponens — Nếu P và P→Q thì Q)
-
 Pipeline 2 stage:
   Stage 1 — IE tier-based (knowledge_base.py + inference_engine.py)
             → 31 rules R01–R31 chọn tier cho từng linh kiện
-  Stage 2 — Budget allocation (rules R32–R39 trong file này)
+  Stage 2 — Budget allocation (rules R32–R40 trong file này)
             → phân bổ % ngân sách cho 6 linh kiện chính + min specs
 
-Cả 2 stage đều dùng vòng lặp fixpoint (Modus Ponens lặp đến khi không
-còn rule nào fire được), mỗi rule fire đúng 1 lần trong 1 lần chạy.
+Cả 2 stage đều dùng vòng lặp fixpoint — suy luận theo chuỗi luật IF-THEN
+đến khi không còn rule nào fire được, mỗi rule fire đúng 1 lần.
 
 Output: WorkingMemory đã enriched với:
   - tier (từ stage 1): cpu_tier, gpu_tier, ram_capacity, ...
@@ -63,7 +59,6 @@ OVERALL_TIER: dict[str, str] = {
 # Tỉ lệ phân bổ ngân sách cho 6 linh kiện chính theo overall tier.
 # Tổng mỗi hàng = 100%. Case + Cooler được tính riêng trong filter_domains
 # (case = 6% ngân_sách, cooler = 4% ngân_sách — xem csp_checker.py).
-# Nguồn: CLAUDE.md mục 4 (R09–R11), mở rộng thêm tier "extreme".
 BUDGET_PERCENTS: dict[str, dict[str, float]] = {
     "budget":  {"cpu": 0.25, "gpu": 0.30, "ram": 0.15, "mb": 0.15, "psu": 0.08, "storage": 0.07},
     "mid":     {"cpu": 0.22, "gpu": 0.35, "ram": 0.13, "mb": 0.15, "psu": 0.07, "storage": 0.08},
@@ -134,8 +129,7 @@ BUDGET_RULES: list[BudgetRule] = [
     ),
 
     # ── NHÓM B: Re-allocation khi không cần GPU rời (R36) ─────────
-    # Suy ra fact mới từ fact đã có — minh họa Modus Ponens chuỗi:
-    #   gpu_tier=none ∧ gpu_budget>0  ⇒  chuyển 60% gpu_budget sang cpu_budget
+    # Không cần GPU rời → chuyển phần lớn gpu_budget sang cpu_budget
     BudgetRule(
         id="R36",
         doc="IF gpu_tier=none AND gpu_budget>0 THEN dồn 60% gpu_budget sang cpu_budget",
@@ -185,6 +179,20 @@ BUDGET_RULES: list[BudgetRule] = [
         doc="IF chưa có ram_min_gb THEN tra MIN_SPECS[muc_dich] gán min specs",
         condition=lambda wm: wm.ram_min_gb == 0,
         action=lambda wm: _set_min_specs(wm),
+    ),
+
+    # ── NHÓM E: Tối đa hóa ngân sách (R40) ───────────────────────
+    # Sau khi phân bổ, tăng gpu_budget và cpu_budget để sử dụng 88-95% ngân sách
+    # thay vì 80-85%. C5 trong CSP vẫn giới hạn tổng chi tiêu thực tế.
+    BudgetRule(
+        id="R40",
+        doc="Tăng gpu_budget thêm 10%, cpu_budget thêm 5% để tối đa hóa hiệu năng trong ngân sách",
+        condition=lambda wm: wm.cpu_budget > 0 and not getattr(wm, "_r40_adjusted", False),
+        action=lambda wm: (
+            setattr(wm, "gpu_budget", wm.gpu_budget + wm.ngan_sach * 0.10),
+            setattr(wm, "cpu_budget", wm.cpu_budget + wm.ngan_sach * 0.05),
+            setattr(wm, "_r40_adjusted", True),
+        ),
     ),
 ]
 

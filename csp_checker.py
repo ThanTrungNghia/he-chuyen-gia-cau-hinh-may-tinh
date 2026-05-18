@@ -1,10 +1,6 @@
 """
 csp_checker.py — CSP (Constraint Satisfaction Problem) + Forward Checking
 ==========================================================================
-Nguồn lý thuyết:
-  - Module6 — Tìm kiếm Thỏa mãn ràng buộc (slide CSP, FC, MRV)
-  - lesson_5 — Constraint Satisfaction (slide 24: MRV; slide 27-31: FC)
-
 Variables:
   cpu, mainboard, ram, vga, psu, storage, case, cooler
 
@@ -20,13 +16,8 @@ Constraints (5 chính + 2 bonus):
   C6  cooler-cpu: cpu.socket  ∈ cooler.socket_support           (bonus)
   C7  cooler-tdp: cpu.tdp_w  <= cooler_tdp_max(cooler.type)     (bonus)
 
-Forward Checking (lesson_5 slide 27-31):
-  "Keep track of remaining legal values for unassigned variables.
-   Terminate search when any variable has no legal values."
-
-MRV — Most Constrained Variable (lesson_5 slide 24):
-  Gán biến có nhiều ràng buộc nhất trước → giảm bùng nổ tổ hợp.
-  Thứ tự: mainboard → cpu → ram → vga → psu → case → cooler → storage
+Thu hẹp domain sau mỗi lần gán biến để phát hiện sớm xung đột.
+Thứ tự gán: mainboard → cpu → ram → vga → psu → case → cooler → storage
 """
 
 import os
@@ -77,6 +68,21 @@ COOLER_TYPE_MAP: dict[str, str] = {
     "Quạt":             "stock",
     "Tản nhiệt Laptop": "stock",        # ngoài scope, exclude trong filter
 }
+
+
+def _parse_storage_capacity(row) -> float:
+    """Parse dung lượng storage từ capacity_raw ('1TB','512GB') hoặc tên sản phẩm."""
+    for src in (row.get("capacity_raw"), row.get("name")):
+        if not src or (isinstance(src, float) and src != src):
+            continue
+        text = str(src).upper()
+        m_tb = re.search(r"(\d+(?:\.\d+)?)\s*TB", text)
+        if m_tb:
+            return float(m_tb.group(1)) * 1000
+        m_gb = re.search(r"(\d+(?:\.\d+)?)\s*GB", text)
+        if m_gb:
+            return float(m_gb.group(1))
+    return 0.0
 
 
 def _normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
@@ -155,6 +161,10 @@ def load_data() -> dict[str, list[dict]]:
                 lambda x: int(re.search(r"\d+", str(x)).group()) if pd.notna(x) and re.search(r"\d+", str(x)) else 4
             )
 
+        # Storage: parse capacity_gb từ cột "Dung lượng" (capacity_raw) hoặc tên sản phẩm
+        if key == "storage":
+            df["capacity_gb"] = df.apply(_parse_storage_capacity, axis=1)
+
         out[key] = df.to_dict("records")
 
     return out
@@ -222,42 +232,99 @@ def filter_domains(data: dict[str, list[dict]], wm: WorkingMemory) -> dict[str, 
     ]
 
     # ── PSU ───────────────────────────────────────────────────────
-    psu_dom = [
+    # Lọc trước: bỏ PSU hàng Demo/Test và PSU quá rẻ (< 500K)
+    _psu_demo_kw = ("demo", "test", "sample", "mẫu", "stock buffer")
+    _psu_clean = [
         r for r in data["psu"]
+        if _f(r.get("price")) >= 500_000
+        and _f(r.get("wattage_w")) >= 400
+        and not any(kw in str(r.get("name", "")).lower() for kw in _psu_demo_kw)
+    ]
+    psu_dom = [
+        r for r in _psu_clean
         if 0 < _f(r.get("price")) <= wm.psu_budget
         and _f(r.get("wattage_w")) >= wm.psu_wattage_min
     ]
+    # Fallback: nếu không có PSU trong budget thì lấy PSU rẻ nhất hợp lệ
+    if not psu_dom and _psu_clean:
+        cheapest = min(_psu_clean, key=lambda r: _f(r.get("price")))
+        psu_dom = [cheapest]
 
     # ── Storage ───────────────────────────────────────────────────
-    # KB output: ssd-only/nvme-only/ssd+hdd/nvme+hdd
-    # CSV chỉ có SSD/HDD/External → filter ưu tiên SSD (phù hợp tất cả)
+    # Dùng budget 2× để có đủ lựa chọn (CSP C5 vẫn giới hạn tổng chi tiêu thực)
+    # Chỉ lấy storage gắn trong (SSD/HDD), loại di động và external
+    _sto_types   = ("SSD", "HDD")
+    _sto_budget  = wm.storage_budget * 2.0   # nới rộng để domain đủ lớn
+    _storage_min = wm.storage_min_gb
+
     sto_dom = [
         r for r in data["storage"]
-        if 0 < _f(r.get("price")) <= wm.storage_budget
-        and r.get("type") == "SSD"
-        and _f(r.get("capacity_gb")) >= wm.storage_min_gb
+        if 0 < _f(r.get("price")) <= _sto_budget
+        and r.get("type") in _sto_types
+        and _f(r.get("capacity_gb")) >= _storage_min
     ]
-    # Fallback: nới capacity nếu không có SSD đủ lớn
+    # Fallback: nới capacity nếu quá ít lựa chọn (< 5)
+    if len(sto_dom) < 5:
+        half_cap = max(_storage_min * 0.5, 128)
+        sto_dom_extra = [
+            r for r in data["storage"]
+            if 0 < _f(r.get("price")) <= _sto_budget
+            and r.get("type") in _sto_types
+            and _f(r.get("capacity_gb")) >= half_cap
+        ]
+        # Ghép và dedup
+        seen_ids = {id(r) for r in sto_dom}
+        for r in sto_dom_extra:
+            if id(r) not in seen_ids:
+                sto_dom.append(r)
+                seen_ids.add(id(r))
+    # Last resort: bất kỳ SSD/HDD nào trong 3× budget
     if not sto_dom:
         sto_dom = [
             r for r in data["storage"]
-            if 0 < _f(r.get("price")) <= wm.storage_budget
-            and r.get("type") in ("SSD", "HDD")
+            if 0 < _f(r.get("price")) <= _sto_budget * 1.5
+            and r.get("type") in _sto_types
         ]
 
     # ── Case ──────────────────────────────────────────────────────
     case_dom = [
         r for r in data["case"]
-        if 0 < _f(r.get("price")) <= wm.ngan_sach * 0.06
+        if _f(r.get("price")) >= 200_000          # loại case quá rẻ
+        and _f(r.get("price")) <= wm.ngan_sach * 0.06
     ]
+    # Gaming/editing/streaming: ưu tiên case ATX/mATX đủ rộng
+    if wm.muc_dich in ("gaming", "editing", "streaming"):
+        _pref = [r for r in case_dom if r.get("form_factor") in ("ATX", "mATX")]
+        if _pref:
+            case_dom = _pref
+    # Giới hạn domain case tối đa 50 records (sắp theo giá tăng dần)
+    case_dom = sorted(case_dom, key=lambda r: _f(r.get("price")))[:50]
 
     # ── Cooler ────────────────────────────────────────────────────
-    # Loại "Tản nhiệt Laptop" và các loại không relevant
+    # Loại bỏ quạt case, tản nhiệt laptop, và cooler chỉ Intel với build AMD
+    _case_fan_kw   = ("fan case", "case fan", "quạt case", "quạt két")
+    _intel_only_kw = ("only intel", "intel only", "intel lga only", "lga only")
+    _amd_only_kw   = ("only amd", "am4 only", "am5 only")
+    _cpu_socket    = str(wm.cpu_tier).lower()   # dùng để gợi ý, không chính xác
+
+    def _cooler_ok(r: dict) -> bool:
+        name_l = str(r.get("name", "")).lower()
+        if any(kw in name_l for kw in _case_fan_kw):
+            return False
+        return True
+
     cooler_dom = [
         r for r in data["cooler"]
         if 0 < _f(r.get("price")) <= wm.ngan_sach * 0.04
         and r.get("type") in ("Tản khí", "Tản nước AIO", "Tản nước")
+        and _cooler_ok(r)
     ]
+    # Luôn thêm box cooler stock làm fallback tương thích mọi socket CPU
+    cooler_dom.append({
+        "name": "Box Cooler (stock)", "price": 0,
+        "type": "Tản khí",
+        "socket_support": "AM4,AM5,LGA1700,LGA1851,LGA1200,AM3,AM3+,LGA1151,LGA1150",
+    })
 
     return {
         "cpu":       cpu_dom,
@@ -347,7 +414,9 @@ def _check_partial(a: dict) -> bool:
             return False
     if "cpu" in a and "vga" in a and "psu" in a:
         cpu_tdp = _f(a["cpu"].get("tdp_w"), 65)
-        vga_tdp = _f(a["vga"].get("tdp_w"), 0)
+        # Dữ liệu scraped thường ghi "công suất PSU khuyến nghị" thay vì TDP thực của GPU.
+        # Cap tại 300W để tránh loại bỏ nhầm các VGA hợp lệ do dữ liệu sai.
+        vga_tdp = min(_f(a["vga"].get("tdp_w"), 0), 300)
         psu_w   = _f(a["psu"].get("wattage_w"), 500)
         if (cpu_tdp + vga_tdp) > psu_w * 0.8:
             return False

@@ -673,16 +673,16 @@ def _rules() -> list[Rule]:
             ),
             action=lambda wm: (
                 wm.warnings.append(
-                    "⚠ Ngân sách có thể không đủ cho cấu hình gaming-high. "
-                    "Gợi ý: tăng ngân sách lên 35-40tr hoặc chọn gaming-mid."
+                    "💡 Với ngân sách hiện tại, hệ thống đề xuất cấu hình gaming tầm trung. "
+                    "Để có hiệu năng cao hơn, bạn có thể tăng ngân sách lên 25–30tr."
                 ),
                 wm.__dict__.update({
-                    "gpu_tier": "gaming-mid"   # Hạ xuống để CSP tìm được kết quả
+                    "gpu_tier": "gaming-mid"
                 })
             ),
             explanation=(
-                "Phát hiện mâu thuẫn: ngân sách < 30tr nhưng GPU tier đang là gaming-high/workstation. "
-                "Tự động điều chỉnh GPU tier xuống gaming-mid và cảnh báo người dùng."
+                "Ngân sách chưa đủ cho cấu hình gaming cao cấp — "
+                "tự động điều chỉnh sang gaming tầm trung để tìm được kết quả phù hợp."
             ),
         ),
 

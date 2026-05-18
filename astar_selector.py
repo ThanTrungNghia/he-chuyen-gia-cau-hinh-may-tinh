@@ -1,35 +1,46 @@
 """
 astar_selector.py — A* Search để chọn cấu hình tối ưu
 =======================================================
-Nguồn lý thuyết:
-  - Module 3 — Tìm kiếm heuristic (slide 13-28: f(n) = g(n) + h(n))
-  - lesson_34 — Informed search
-      * slide 29: "If h(n) is admissible, A* using TREE-SEARCH is optimal"
-      * slide 32: consistent — h(n) ≤ c(n,a,n') + h(n')
-
 Ánh xạ A* vào bài toán chọn cấu hình:
   - Mỗi cấu hình hợp lệ (do CSP trả về) là một goal-state candidate.
   - g(config) = chi phí thực tế đã tích lũy = total_price / ngan_sach   ∈ [0, 1]
-  - h(config) = ước tính chi phí "còn lại" = 1 - performance_score(config)
-                                                                        ∈ [0, 1]
+  - h(config) = ước tính chi phí còn lại = 1 - performance_score(config) ∈ [0, 1]
   - f(config) = g + h (càng nhỏ càng tốt — vừa rẻ vừa mạnh)
 
-Tính ADMISSIBLE của h:
-  - performance_score ∈ [0, 1]  (0 = tệ nhất, 1 = hoàn hảo)
-  - h = 1 - perf      ∈ [0, 1]
-  - Goal lý tưởng có perf = 1 (đạt 100% hiệu năng) → h* = 0
-  - h(n) ≤ h*(n) luôn đúng vì h ≥ 0 và h* ≥ 0
-  → A* đảm bảo trả về cấu hình có f tối thiểu (định lý slide 29).
-
-Tính CONSISTENT:
-  - Trong setting flat list (không có successor), tự động consistent.
+Heuristic h là admissible vì performance_score ∈ [0,1] nên h ≥ 0 và h ≤ 1.
+A* trả về cấu hình có f tối thiểu trong tập hợp lệ từ CSP.
 
 Trọng số WEIGHTS theo mục đích sử dụng — phản ánh ưu tiên thực tế:
   ví dụ gaming ưu tiên GPU 45%, office ưu tiên CPU 40% và RAM 35%.
 """
 
+import re
 import heapq
 from knowledge_base import WorkingMemory
+
+
+def _extract_from_name(name: str, kind: str) -> float:
+    """Extract numeric specs từ tên sản phẩm khi cột CSV bị NaN/0."""
+    text = str(name).upper()
+    if kind == "capacity_gb":
+        m = re.search(r"(\d+(?:\.\d+)?)\s*TB", text)
+        if m: return float(m.group(1)) * 1000
+        m = re.search(r"(\d+(?:\.\d+)?)\s*GB", text)
+        if m: return float(m.group(1))
+    elif kind == "speed_mhz":
+        m = re.search(r"(\d{4,5})\s*MHZ", text)
+        if m: return float(m.group(1))
+        m = re.search(r"(\d{4,5})\s*MT/S", text)
+        if m: return float(m.group(1))
+    elif kind == "cores":
+        for pat in (r"(\d+)\s*(?:NHÂN|CORE|COR)", r"(\d+)-CORE", r"(\d+)\s*X\s*\d+"):
+            m = re.search(pat, text)
+            if m: return float(m.group(1))
+    elif kind == "vram_gb":
+        # Match "8GB GDDR" or "8G GDDR" before GDDR keyword
+        m = re.search(r"(\d+)\s*G\s*(?:B\s*)?GDDR", text)
+        if m: return float(m.group(1))
+    return 0.0
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -62,33 +73,61 @@ def _f(x, default=0.0) -> float:
 def performance_score(config: dict, wm: WorkingMemory) -> float:
     """
     Tính điểm hiệu năng tổng hợp của 1 cấu hình ∈ [0, 1].
-      cpu_score = min(cores / 16, 1.0)        — 16 nhân = max
-      gpu_score = min(vram_gb / 24, 1.0)      — 24GB VRAM = max (RTX 4090)
-      ram_score = min(capacity_gb / 64, 1.0)  — 64GB = max
-      storage_score = {NVMe: 1.0, SSD: 0.7, HDD: 0.3}
-
-    Trọng số WEIGHTS[muc_dich] phản ánh đâu là linh kiện quan trọng.
+    Bao gồm yếu tố phụ để phân biệt các cấu hình cùng tier:
+      - price_efficiency: cấu hình rẻ hơn trong cùng tier được điểm cao hơn
+      - psu_quality: 80+ Gold/Platinum thêm điểm
+      - storage_capacity: 512GB/1TB/2TB được normalize
+      - ram_speed: tốc độ bus RAM (normalize max 6000MHz)
     """
     w = WEIGHTS.get(wm.muc_dich, WEIGHTS["office"])
 
-    cpu_score = min(_f(config["cpu"].get("cores"), 4) / 16.0, 1.0)
+    cpu     = config["cpu"]
+    cpu_name = str(cpu.get("name", ""))
+    cores_raw = _f(cpu.get("cores"), 0)
+    cores = cores_raw if cores_raw >= 2 else _extract_from_name(cpu_name, "cores") or 4
+    cpu_score = min(cores / 16.0, 1.0)
 
-    vga = config.get("vga", {})
-    vram = _f(vga.get("vram_gb"), 0)
-    # GPU score: nếu không có GPU rời (vga_iGPU placeholder), vram=0 → score=0
+    vga  = config.get("vga", {})
+    vga_name = str(vga.get("name", ""))
+    vram_raw = _f(vga.get("vram_gb"), 0)
+    vram = vram_raw if vram_raw > 0 else _extract_from_name(vga_name, "vram_gb")
     gpu_score = min(vram / 24.0, 1.0)
 
-    ram_gb = _f(config["ram"].get("capacity_gb"), 8)
-    ram_score = min(ram_gb / 64.0, 1.0)
+    ram      = config["ram"]
+    ram_name = str(ram.get("name", ""))
+    ram_gb_raw = _f(ram.get("capacity_gb"), 0)
+    ram_gb  = ram_gb_raw if ram_gb_raw >= 4 else _extract_from_name(ram_name, "capacity_gb") or 8
+    ram_base = min(ram_gb / 64.0, 1.0)
+    spd_raw = _f(ram.get("speed_mhz"), 0)
+    ram_speed = spd_raw if spd_raw >= 1600 else _extract_from_name(ram_name, "speed_mhz") or 3200
+    ram_speed_score = min(ram_speed / 6000.0, 1.0)
+    ram_score = (ram_base * 0.7 + ram_speed_score * 0.3)
 
-    storage_type = str(config["storage"].get("type", "")).strip()
-    storage_bonus = {"NVMe": 1.0, "SSD": 0.7, "HDD": 0.3}
-    storage_score = storage_bonus.get(storage_type, 0.5)
+    sto      = config["storage"]
+    sto_name = str(sto.get("name", ""))
+    storage_type = str(sto.get("type", "")).strip()
+    # Detect NVMe từ tên sản phẩm nếu type không ghi rõ
+    if storage_type == "SSD" and any(kw in sto_name.upper() for kw in ("NVME", "M.2", "PCIE")):
+        storage_type = "NVMe"
+    storage_type_bonus = {"NVMe": 1.0, "SSD": 0.7, "HDD": 0.3}
+    sto_type_score = storage_type_bonus.get(storage_type, 0.5)
+    sto_cap_raw = _f(sto.get("capacity_gb"), 0)
+    sto_cap = sto_cap_raw if sto_cap_raw >= 64 else _extract_from_name(sto_name, "capacity_gb") or 256
+    sto_cap_score = 1.0 if sto_cap >= 2000 else (0.7 if sto_cap >= 1000 else (0.5 if sto_cap >= 512 else 0.3))
+    storage_score = (sto_type_score * 0.6 + sto_cap_score * 0.4)
 
-    return (w["cpu"]     * cpu_score
-            + w["gpu"]   * gpu_score
-            + w["ram"]   * ram_score
-            + w["storage"] * storage_score)
+    base = (w["cpu"] * cpu_score + w["gpu"] * gpu_score
+            + w["ram"] * ram_score + w["storage"] * storage_score)
+
+    # PSU quality bonus
+    efficiency = str(config.get("psu", {}).get("efficiency", "")).lower()
+    psu_bonus = 0.03 if "platinum" in efficiency else (0.02 if "gold" in efficiency else 0.0)
+
+    # Price efficiency bonus: cấu hình rẻ hơn trong cùng tier được điểm cao hơn
+    total_price = _f(config.get("total"), 0)
+    price_eff = max(0.0, 1.0 - total_price / wm.ngan_sach) if wm.ngan_sach > 0 else 0.0
+
+    return min(base + psu_bonus + 0.08 * price_eff, 1.0)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -134,8 +173,7 @@ def astar_select(
         top3   : 3 cấu hình tốt nhất (best ở index 0)
         best_f : giá trị f(best)
 
-    Định lý A* (lesson_34 slide 29): nếu h admissible,
-    cấu hình trả về có f tối thiểu = lựa chọn tối ưu.
+    Vì h admissible, cấu hình trả về có f tối thiểu = lựa chọn tối ưu.
     """
     if not valid_configs:
         raise ValueError("astar_select: valid_configs rỗng")
@@ -158,19 +196,17 @@ def astar_select(
 
 
 def explain_score(config: dict, wm: WorkingMemory) -> dict:
-    """
-    Trả về breakdown chi tiết để hiển thị trên UI/báo cáo:
-      {g, h, f, perf, sub_scores: {cpu, gpu, ram, storage}, weights}
-    """
+    """Trả về breakdown chi tiết để hiển thị trên UI: {g, h, f, perf, sub_scores, weights}."""
     w = WEIGHTS.get(wm.muc_dich, WEIGHTS["office"])
-    cpu_s     = min(_f(config["cpu"].get("cores"), 4) / 16.0, 1.0)
-    vram      = _f(config.get("vga", {}).get("vram_gb"), 0)
-    gpu_s     = min(vram / 24.0, 1.0)
-    ram_s     = min(_f(config["ram"].get("capacity_gb"), 8) / 64.0, 1.0)
+    cpu_s = min(_f(config["cpu"].get("cores"), 4) / 16.0, 1.0)
+    vram  = _f(config.get("vga", {}).get("vram_gb"), 0)
+    gpu_s = min(vram / 24.0, 1.0)
+    ram_gb = _f(config["ram"].get("capacity_gb"), 8)
+    ram_s  = min(ram_gb / 64.0, 1.0)
     storage_t = str(config["storage"].get("type", "")).strip()
-    sto_s     = {"NVMe": 1.0, "SSD": 0.7, "HDD": 0.3}.get(storage_t, 0.5)
+    sto_s = {"NVMe": 1.0, "SSD": 0.7, "HDD": 0.3}.get(storage_t, 0.5)
 
-    perf = w["cpu"]*cpu_s + w["gpu"]*gpu_s + w["ram"]*ram_s + w["storage"]*sto_s
+    perf = performance_score(config, wm)
     g_v  = g(config, wm)
     h_v  = 1.0 - perf
     return {
