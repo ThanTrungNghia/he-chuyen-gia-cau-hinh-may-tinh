@@ -1,23 +1,22 @@
 """
-csp_checker.py — CSP (Constraint Satisfaction Problem) + Forward Checking
-==========================================================================
-Variables:
-  cpu, mainboard, ram, vga, psu, storage, case, cooler
+csp_checker.py — Kiểm tra xem các linh kiện có tương thích với nhau không
+===========================================================================
+File này đọc dữ liệu sản phẩm từ CSV, lọc theo yêu cầu, rồi thử ghép các
+linh kiện lại với nhau để tìm tổ hợp hợp lệ.
 
-Domains: tập sản phẩm thỏa mãn (a) tier do FC chọn và (b) ngân sách
-         được phân bổ cho linh kiện đó (cpu_budget, gpu_budget, ...).
+Các linh kiện cần ghép: cpu, mainboard, ram, vga, psu, storage, case, cooler
 
-Constraints (5 chính + 2 bonus):
-  C1  socket    : cpu.socket == mainboard.socket
-  C2  ddr_type  : ram.type    == mainboard.supported_ddr
-  C3  power     : cpu.tdp + vga.tdp <= psu.wattage * 0.8        (headroom 20%)
-  C4  form_fact : case_form_factor accommodates mainboard_ff
-  C5  budget    : sum(prices) <= ngan_sach
-  C6  cooler-cpu: cpu.socket  ∈ cooler.socket_support           (bonus)
-  C7  cooler-tdp: cpu.tdp_w  <= cooler_tdp_max(cooler.type)     (bonus)
+Điều kiện tương thích (5 chính + 2 bổ sung):
+  C1  socket      : CPU và Mainboard phải dùng cùng loại socket
+  C2  loại RAM    : RAM và Mainboard phải cùng loại DDR (DDR4 hoặc DDR5)
+  C3  công suất   : Tổng điện năng tiêu thụ không vượt quá 80% công suất nguồn
+  C4  kích thước  : Vỏ máy phải đủ lớn để chứa Mainboard
+  C5  tổng tiền   : Tổng giá các linh kiện không được vượt ngân sách
+  C6  socket tản  : Tản nhiệt phải hỗ trợ socket của CPU
+  C7  TDP tản     : Tản nhiệt phải đủ mát cho mức tiêu thụ của CPU
 
-Thu hẹp domain sau mỗi lần gán biến để phát hiện sớm xung đột.
-Thứ tự gán: mainboard → cpu → ram → vga → psu → case → cooler → storage
+Sau mỗi lần chọn một linh kiện, tự động loại bỏ các lựa chọn không còn phù hợp.
+Thứ tự chọn: mainboard → cpu → ram → vga → psu → case → cooler → storage
 """
 
 import os
@@ -37,9 +36,8 @@ DATA_DIR = "DATA"
 # DATA LOADING
 # ══════════════════════════════════════════════════════════════════
 
-# Map Case form_factor (CSV) → Mainboard form_factor (chuẩn ATX/mATX/ITX)
-# Vì case CSV dùng "Tower" naming chứ không dùng ATX/mATX/ITX trực tiếp.
-# Quy ước: case lớn chứa được mọi mainboard nhỏ hơn (xem ff_compatible).
+# Chuyển đổi tên kiểu vỏ máy trong CSV ("Tower") sang chuẩn ATX/mATX/ITX
+# Vỏ lớn hơn chứa được mainboard nhỏ hơn (xem hàm ff_compatible).
 CASE_FF_MAP: dict[str, str] = {
     "Super Tower":  "EATX",   # > ATX
     "Full Tower":   "ATX",
@@ -48,7 +46,7 @@ CASE_FF_MAP: dict[str, str] = {
     "Mini Tower":   "ITX",
 }
 
-# Map Mainboard form_factor (CSV "Kích thước") → chuẩn ATX/mATX/ITX
+# Chuyển đổi tên kích thước mainboard trong CSV sang chuẩn ATX/mATX/ITX
 MB_FF_MAP: dict[str, str] = {
     "ATX":        "ATX",
     "Micro-ATX":  "mATX",
@@ -60,7 +58,7 @@ MB_FF_MAP: dict[str, str] = {
     "EATX":       "EATX",
 }
 
-# Map Cooler type (tiếng Việt) → tier key trong COOLER_TDP_SUPPORT (KB)
+# Chuyển đổi loại tản nhiệt từ tên tiếng Việt trong CSV sang key trong bảng tra cứu
 COOLER_TYPE_MAP: dict[str, str] = {
     "Tản khí":          "air-mid",      # default mid; nâng/hạ tùy giá nếu cần
     "Tản nước AIO":     "aio-240",
@@ -71,7 +69,7 @@ COOLER_TYPE_MAP: dict[str, str] = {
 
 
 def _parse_storage_capacity(row) -> float:
-    """Parse dung lượng storage từ capacity_raw ('1TB','512GB') hoặc tên sản phẩm."""
+    """Đọc dung lượng ổ cứng từ cột capacity_raw ('1TB', '512GB') hoặc từ tên sản phẩm."""
     for src in (row.get("capacity_raw"), row.get("name")):
         if not src or (isinstance(src, float) and src != src):
             continue
@@ -86,17 +84,13 @@ def _parse_storage_capacity(row) -> float:
 
 
 def _normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Một số CSV có tên cột tiếng Việt ở dạng NFD (combining chars),
-    còn source code Python dùng NFC. Normalize NFC để dùng tên cột
-    trực tiếp được trong code.
-    """
+    """Chuẩn hóa tên cột CSV về NFC để so sánh chuỗi tiếng Việt không bị lỗi."""
     df.columns = [unicodedata.normalize("NFC", c) for c in df.columns]
     return df
 
 
 def _normalize_str_col(df: pd.DataFrame, col: str) -> pd.DataFrame:
-    """Normalize NFC cho TẤT CẢ giá trị string trong 1 cột (vd cooler.type)."""
+    """Chuẩn hóa NFC cho tất cả giá trị trong một cột (tránh lỗi so sánh tiếng Việt)."""
     if col in df.columns:
         df[col] = df[col].apply(
             lambda v: unicodedata.normalize("NFC", str(v)) if pd.notna(v) else v
@@ -106,8 +100,10 @@ def _normalize_str_col(df: pd.DataFrame, col: str) -> pd.DataFrame:
 
 def load_data() -> dict[str, list[dict]]:
     """
-    Đọc 8 CSV trong DATA/, normalize columns, rename cột tiếng Việt
-    sang English snake_case, trả về dict cho CSP.
+    Đọc dữ liệu sản phẩm từ 8 file CSV trong thư mục DATA/.
+
+    Tự động chuẩn hóa tên cột và chuyển đổi định dạng cần thiết.
+    Trả về dict gồm 8 danh sách sản phẩm: cpu, vga, ram, mainboard, psu, storage, case, cooler.
     """
     files = {
         "cpu":       "Data_CPU.csv",
@@ -185,10 +181,12 @@ def _f(x, default=0.0) -> float:
 
 def filter_domains(data: dict[str, list[dict]], wm: WorkingMemory) -> dict[str, list[dict]]:
     """
-    Lọc domain mỗi biến theo:
-      - tier (FC đã chọn, map sang CSV tier)
-      - budget (FC đã phân bổ)
-      - min specs (ram_min_gb, vram_min_gb)
+    Lọc sản phẩm phù hợp cho từng linh kiện dựa trên:
+      - Tầm giá (tier đã xác định từ bước tư vấn)
+      - Ngân sách phân bổ cho từng linh kiện
+      - Yêu cầu tối thiểu (RAM, VRAM, dung lượng ổ cứng)
+
+    Trả về dict chứa danh sách sản phẩm hợp lệ cho mỗi loại linh kiện.
     """
     cpu_csv_tier = TIER_MAP_CPU.get(wm.cpu_tier)
     gpu_csv_tier = TIER_MAP_GPU.get(wm.gpu_tier)
@@ -339,10 +337,10 @@ def filter_domains(data: dict[str, list[dict]], wm: WorkingMemory) -> dict[str, 
 
 
 # ══════════════════════════════════════════════════════════════════
-# CONSTRAINTS
+# Các hàm kiểm tra điều kiện tương thích giữa linh kiện
 # ══════════════════════════════════════════════════════════════════
 
-# Form factor compatibility: case lớn chứa được mainboard nhỏ hơn
+# Thứ tự kích thước: vỏ lớn hơn thì số lớn hơn, đủ điều kiện chứa mainboard nhỏ hơn
 FF_ORDER: dict[str, int] = {"EATX": 4, "ATX": 3, "mATX": 2, "ITX": 1}
 
 
@@ -351,7 +349,7 @@ def ff_compatible(case_ff: str, mb_ff: str) -> bool:
 
 
 def _cooler_supports_socket(cooler_socket_support: str, cpu_socket: str) -> bool:
-    """Kiểm tra cpu socket có nằm trong chuỗi socket_support của cooler."""
+    """Kiểm tra tản nhiệt có hỗ trợ socket của CPU không."""
     s = str(cooler_socket_support or "").upper()
     target = str(cpu_socket or "").upper()
     if not target:
@@ -363,23 +361,23 @@ def _cooler_supports_socket(cooler_socket_support: str, cpu_socket: str) -> bool
 
 
 def _check_pair(a: dict, var1: str, var2: str) -> bool:
-    """Check tất cả binary constraint giữa var1 và var2 (đã có trong assignment a)."""
+    """Kiểm tra điều kiện tương thích giữa 2 linh kiện đã được chọn."""
     pair = {var1, var2}
 
-    # C1 socket
+    # C1: CPU và Mainboard phải dùng cùng loại socket
     if pair == {"cpu", "mainboard"}:
         return a["cpu"].get("socket") == a["mainboard"].get("socket")
 
-    # C2 ddr_type
+    # C2: RAM và Mainboard phải cùng loại DDR (DDR4 hoặc DDR5)
     if pair == {"ram", "mainboard"}:
         return a["ram"].get("type") == a["mainboard"].get("supported_ddr")
 
-    # C4 form_factor
+    # C4: Vỏ máy phải đủ lớn để chứa Mainboard
     if pair == {"case", "mainboard"}:
         return ff_compatible(a["case"].get("form_factor", "ATX"),
                              a["mainboard"].get("form_factor", "ATX"))
 
-    # C6 cooler-cpu socket
+    # C6: Tản nhiệt phải hỗ trợ socket của CPU
     if pair == {"cooler", "cpu"}:
         return _cooler_supports_socket(a["cooler"].get("socket_support", ""),
                                         a["cpu"].get("socket", ""))
@@ -389,8 +387,8 @@ def _check_pair(a: dict, var1: str, var2: str) -> bool:
 
 def _check_partial(a: dict) -> bool:
     """
-    Check tất cả constraint áp dụng được trên assignment hiện tại
-    (bỏ qua constraint nếu chưa đủ biến).
+    Kiểm tra tất cả điều kiện có thể áp dụng cho các linh kiện đã chọn.
+    Bỏ qua điều kiện nếu linh kiện liên quan chưa được chọn.
     """
     if "cpu" in a and "mainboard" in a:
         if a["cpu"].get("socket") != a["mainboard"].get("socket"):
@@ -424,27 +422,26 @@ def _check_partial(a: dict) -> bool:
 
 
 # ══════════════════════════════════════════════════════════════════
-# CSP + FORWARD CHECKING
+# Tìm kiếm và ghép linh kiện
 # ══════════════════════════════════════════════════════════════════
 
-# MRV order: mainboard nhiều constraint nhất → gán đầu tiên
+# Thứ tự chọn linh kiện: chọn mainboard trước vì nó liên quan đến nhiều linh kiện nhất
 ASSIGNMENT_ORDER: list[str] = [
-    "mainboard",  # bị ràng buộc bởi cpu (socket), ram (ddr), case (form_factor)
+    "mainboard",  # liên quan đến CPU (socket), RAM (DDR), vỏ máy (kích thước)
     "cpu",        # phải khớp socket với mainboard
-    "ram",        # phải khớp ddr với mainboard
-    "vga",        # ảnh hưởng PSU (TDP)
-    "psu",        # phụ thuộc tổng TDP
-    "case",       # phụ thuộc form_factor mainboard
-    "cooler",     # phụ thuộc socket cpu + cpu TDP
-    "storage",    # độc lập nhất
+    "ram",        # phải cùng loại DDR với mainboard
+    "vga",        # ảnh hưởng đến yêu cầu nguồn điện
+    "psu",        # phụ thuộc tổng điện năng CPU + GPU
+    "case",       # phụ thuộc kích thước mainboard
+    "cooler",     # phụ thuộc socket CPU và mức tiêu thụ điện
+    "storage",    # ít ràng buộc nhất, chọn cuối
 ]
 
 
 def _forward_check(assignment: dict, domains: dict, last_var: str) -> dict | None:
     """
-    Sau khi gán last_var, thu hẹp domain các biến chưa gán
-    bằng cách loại bỏ giá trị vi phạm constraint với last_var.
-    Trả về dict domain mới, hoặc None nếu có domain rỗng.
+    Sau khi chọn một linh kiện, loại bỏ sản phẩm không còn phù hợp khỏi danh sách các linh kiện chưa chọn.
+    Trả về danh sách đã thu hẹp, hoặc None nếu có linh kiện nào bị hết lựa chọn.
     """
     new_domains = {k: list(v) for k, v in domains.items()}
 
@@ -470,14 +467,14 @@ def csp_with_forward_checking(
     max_results: int = 50,
 ) -> list[dict]:
     """
-    Backtracking + Forward Checking + MRV-static-order.
+    Tìm tất cả cấu hình hợp lệ bằng cách thử ghép từng linh kiện lại với nhau.
 
-    Args:
-      domains      — kết quả filter_domains()
-      budget       — wm.ngan_sach (cho C5)
-      max_results  — cap để tránh bùng nổ tổ hợp
+    Tham số:
+        domains     — danh sách sản phẩm hợp lệ từ filter_domains()
+        budget      — ngân sách tối đa (dùng để kiểm tra tổng tiền)
+        max_results — giới hạn số cấu hình tìm được (tránh quá chậm)
 
-    Returns: list các assignment hợp lệ, mỗi assignment có thêm key "total".
+    Trả về: danh sách cấu hình hợp lệ, mỗi cấu hình chứa thêm trường "total" (tổng tiền).
     """
     results: list[dict] = []
 
@@ -485,7 +482,7 @@ def csp_with_forward_checking(
         if len(results) >= max_results:
             return
 
-        # Đã gán đủ biến → check C5 (total budget)
+        # Đã chọn đủ 8 linh kiện → kiểm tra tổng tiền có vượt ngân sách không (C5)
         if len(assignment) == len(ASSIGNMENT_ORDER):
             total = sum(_f(assignment[k].get("price")) for k in ASSIGNMENT_ORDER)
             if total <= budget:
@@ -494,18 +491,18 @@ def csp_with_forward_checking(
                 results.append(cfg)
             return
 
-        # Chọn biến tiếp theo theo thứ tự MRV-static
+        # Lấy linh kiện tiếp theo cần chọn theo thứ tự đã định
         var = ASSIGNMENT_ORDER[len(assignment)]
 
         for value in remaining.get(var, []):
             test = {**assignment, var: value}
             if not _check_partial(test):
-                continue
+                continue  # sản phẩm này vi phạm điều kiện → bỏ qua
 
-            # Forward Checking: thu hẹp domain các biến còn lại
+            # Thu hẹp lựa chọn các linh kiện còn lại sau khi chọn linh kiện này
             new_dom = _forward_check(test, remaining, var)
             if new_dom is None:
-                continue  # backtrack sớm
+                continue  # có linh kiện nào bị hết lựa chọn → quay lui sớm
 
             backtrack(test, new_dom)
             if len(results) >= max_results:
@@ -526,9 +523,10 @@ def filter_with_fallback(
     scale_step: float = 1.5,
 ) -> tuple[dict[str, list[dict]], list[str]]:
     """
-    Lọc domain. Nếu có biến nào domain rỗng, nới ngân sách CHO ĐÚNG biến đó
-    (×1.5 mỗi lần) tới max_attempts lần. Trả về (domains, log) trong đó
-    log là chuỗi mô tả các lần nới.
+    Lọc sản phẩm. Nếu có linh kiện nào không tìm được sản phẩm phù hợp,
+    tự động tăng ngân sách cho linh kiện đó lên ×1.5 và thử lại (tối đa 3 lần).
+
+    Trả về (danh sách sản phẩm, nhật ký các lần nới ngân sách).
     """
     log: list[str] = []
     domains = filter_domains(data, wm)

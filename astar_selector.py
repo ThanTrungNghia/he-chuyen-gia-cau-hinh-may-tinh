@@ -1,17 +1,17 @@
 """
-astar_selector.py — A* Search để chọn cấu hình tối ưu
-=======================================================
-Ánh xạ A* vào bài toán chọn cấu hình:
-  - Mỗi cấu hình hợp lệ (do CSP trả về) là một goal-state candidate.
-  - g(config) = chi phí thực tế đã tích lũy = total_price / ngan_sach   ∈ [0, 1]
-  - h(config) = ước tính chi phí còn lại = 1 - performance_score(config) ∈ [0, 1]
-  - f(config) = g + h (càng nhỏ càng tốt — vừa rẻ vừa mạnh)
+astar_selector.py — Chọn ra cấu hình tốt nhất từ danh sách đã lọc
+====================================================================
+File này nhận danh sách cấu hình hợp lệ từ csp_checker.py và chọn cái tối ưu nhất.
 
-Heuristic h là admissible vì performance_score ∈ [0,1] nên h ≥ 0 và h ≤ 1.
-A* trả về cấu hình có f tối thiểu trong tập hợp lệ từ CSP.
+Mỗi cấu hình được tính điểm theo công thức:
+  - g = tỉ lệ ngân sách đã dùng (tổng tiền / ngân sách), trong khoảng [0, 1]
+  - h = mức độ chưa đạt yêu cầu = 1 - điểm hiệu năng, trong khoảng [0, 1]
+  - f = g + h (điểm càng thấp càng tốt — cấu hình vừa rẻ vừa đáp ứng nhu cầu)
 
-Trọng số WEIGHTS theo mục đích sử dụng — phản ánh ưu tiên thực tế:
-  ví dụ gaming ưu tiên GPU 45%, office ưu tiên CPU 40% và RAM 35%.
+Cấu hình có điểm f thấp nhất sẽ được chọn làm kết quả đề xuất.
+
+Bảng WEIGHTS thay đổi theo mục đích sử dụng:
+  Ví dụ gaming cần GPU nhiều hơn (45%), văn phòng cần CPU và RAM hơn (40% + 35%).
 """
 
 import re
@@ -20,7 +20,7 @@ from knowledge_base import WorkingMemory
 
 
 def _extract_from_name(name: str, kind: str) -> float:
-    """Extract numeric specs từ tên sản phẩm khi cột CSV bị NaN/0."""
+    """Đọc thông số kỹ thuật từ tên sản phẩm khi cột CSV bị thiếu hoặc bằng 0."""
     text = str(name).upper()
     if kind == "capacity_gb":
         m = re.search(r"(\d+(?:\.\d+)?)\s*TB", text)
@@ -44,9 +44,9 @@ def _extract_from_name(name: str, kind: str) -> float:
 
 
 # ══════════════════════════════════════════════════════════════════
-# WEIGHTS — phân bổ trọng số performance theo muc_dich
-# Mỗi hàng tổng = 1.0
-# Vocab khớp với KB (English): office/gaming/graphics/streaming/study/editing
+# WEIGHTS — Mức độ ưu tiên từng linh kiện theo mục đích sử dụng
+# Mỗi hàng tổng = 1.0 (100%)
+# Ví dụ: gaming cần GPU nhiều nhất (45%), văn phòng cần CPU và RAM hơn
 # ══════════════════════════════════════════════════════════════════
 WEIGHTS: dict[str, dict[str, float]] = {
     "gaming":    {"cpu": 0.25, "gpu": 0.45, "ram": 0.15, "storage": 0.15},
@@ -59,7 +59,7 @@ WEIGHTS: dict[str, dict[str, float]] = {
 
 
 def _f(x, default=0.0) -> float:
-    """Safe float cast — NaN / None → default."""
+    """Chuyển giá trị sang số thực, trả về default nếu không hợp lệ hoặc bị NaN."""
     try:
         v = float(x)
         return v if v == v else default
@@ -68,16 +68,16 @@ def _f(x, default=0.0) -> float:
 
 
 # ══════════════════════════════════════════════════════════════════
-# PERFORMANCE SCORE — ∈ [0, 1]
+# Hàm tính điểm hiệu năng của một cấu hình (thang điểm từ 0 đến 1)
 # ══════════════════════════════════════════════════════════════════
 def performance_score(config: dict, wm: WorkingMemory) -> float:
     """
-    Tính điểm hiệu năng tổng hợp của 1 cấu hình ∈ [0, 1].
-    Bao gồm yếu tố phụ để phân biệt các cấu hình cùng tier:
-      - price_efficiency: cấu hình rẻ hơn trong cùng tier được điểm cao hơn
-      - psu_quality: 80+ Gold/Platinum thêm điểm
-      - storage_capacity: 512GB/1TB/2TB được normalize
-      - ram_speed: tốc độ bus RAM (normalize max 6000MHz)
+    Tính điểm tổng hợp của một cấu hình, từ 0 đến 1 (càng cao càng tốt).
+
+    Các yếu tố ảnh hưởng đến điểm:
+      - Số nhân CPU, VRAM của GPU, dung lượng và tốc độ RAM, loại ổ cứng
+      - Cấu hình rẻ hơn trong cùng tầm sẽ được điểm cộng thêm
+      - Nguồn điện chứng nhận 80+ Gold/Platinum được cộng thêm điểm nhỏ
     """
     w = WEIGHTS.get(wm.muc_dich, WEIGHTS["office"])
 
@@ -131,10 +131,10 @@ def performance_score(config: dict, wm: WorkingMemory) -> float:
 
 
 # ══════════════════════════════════════════════════════════════════
-# g(n) and h(n)
+# Hàm tính điểm g và h cho thuật toán chọn cấu hình tối ưu
 # ══════════════════════════════════════════════════════════════════
 def g(config: dict, wm: WorkingMemory) -> float:
-    """g(n) = chi phí thực tế = total_price / ngan_sach ∈ [0, 1]."""
+    """Tính tỉ lệ ngân sách đã dùng = tổng tiền / ngân sách, kết quả từ 0 đến 1."""
     if wm.ngan_sach <= 0:
         return 0.0
     return min(_f(config.get("total")) / wm.ngan_sach, 1.5)   # cap 1.5 cho overshoot
@@ -142,38 +142,35 @@ def g(config: dict, wm: WorkingMemory) -> float:
 
 def h(config: dict, wm: WorkingMemory) -> float:
     """
-    h(n) = ước tính chi phí còn lại = 1 - performance_score ∈ [0, 1].
-    Admissible vì h ≤ h* = 0 khi đạt cấu hình hoàn hảo (perf=1).
+    Ước tính mức độ chưa đạt yêu cầu = 1 - điểm hiệu năng, kết quả từ 0 đến 1.
+    Cấu hình đáp ứng tốt nhu cầu sẽ có h gần 0.
     """
     return 1.0 - performance_score(config, wm)
 
 
 def f_score(config: dict, wm: WorkingMemory) -> float:
-    """f(n) = g(n) + h(n) — càng nhỏ càng tốt."""
+    """Điểm tổng hợp f = g + h. Cấu hình có điểm thấp nhất sẽ được chọn."""
     return g(config, wm) + h(config, wm)
 
 
 # ══════════════════════════════════════════════════════════════════
-# A* SELECTOR
+# Hàm chính: chọn cấu hình tốt nhất từ danh sách hợp lệ
 # ══════════════════════════════════════════════════════════════════
 def astar_select(
     valid_configs: list[dict],
     wm: WorkingMemory,
 ) -> tuple[dict, list[dict], float]:
     """
-    Chọn cấu hình tối ưu từ valid_configs do CSP trả về.
+    Chọn cấu hình tốt nhất từ danh sách do csp_checker.py trả về.
 
-    Args:
-      valid_configs — list dict, mỗi dict chứa cpu/mainboard/.../total
-      wm            — WorkingMemory để lấy muc_dich và ngan_sach
+    Tham số:
+        valid_configs: danh sách cấu hình hợp lệ, mỗi cấu hình là một dict
+        wm: thông tin người dùng (ngân sách, mục đích)
 
-    Returns:
-      (best, top3, best_f)
-        best   : cấu hình tốt nhất theo f-score
-        top3   : 3 cấu hình tốt nhất (best ở index 0)
-        best_f : giá trị f(best)
+    Trả về:
+        (cấu hình tốt nhất, top 3 cấu hình, điểm f của cấu hình tốt nhất)
 
-    Vì h admissible, cấu hình trả về có f tối thiểu = lựa chọn tối ưu.
+    Cấu hình tốt nhất = cấu hình có điểm f thấp nhất trong danh sách.
     """
     if not valid_configs:
         raise ValueError("astar_select: valid_configs rỗng")
@@ -196,7 +193,7 @@ def astar_select(
 
 
 def explain_score(config: dict, wm: WorkingMemory) -> dict:
-    """Trả về breakdown chi tiết để hiển thị trên UI: {g, h, f, perf, sub_scores, weights}."""
+    """Trả về điểm chi tiết của cấu hình để hiển thị trên giao diện: g, h, f, điểm từng thành phần."""
     w = WEIGHTS.get(wm.muc_dich, WEIGHTS["office"])
     cpu_s = min(_f(config["cpu"].get("cores"), 4) / 16.0, 1.0)
     vram  = _f(config.get("vga", {}).get("vram_gb"), 0)

@@ -1,10 +1,12 @@
 """
-predicate_extractor.py — Phân tích ngôn ngữ tự nhiên để extract thông tin người dùng
-======================================================================================
-Nhận dạng 3 thông tin từ câu chat:
-  MucDich(x, value) — nhận diện từ khóa mục đích sử dụng
-  NganSach(x, n)    — nhận diện số tiền ngân sách từ văn bản
-  UuTien(x, value)  — nhận diện ưu tiên người dùng
+predicate_extractor.py — Đọc câu người dùng nhập và lấy ra thông tin cần thiết
+================================================================================
+File này phân tích câu chat tự nhiên để nhận diện 3 thông tin:
+  - Mục đích sử dụng: gaming, văn phòng, đồ họa, lập trình, ...
+  - Ngân sách: số tiền dưới dạng "15 triệu", "20tr", "15000000", ...
+  - Ưu tiên: tiết kiệm, hiệu năng cao, yên tĩnh, nhỏ gọn
+
+Ví dụ: "build máy gaming 15 triệu" → mục đích=gaming, ngân sách=15.000.000đ
 """
 
 import re
@@ -12,10 +14,10 @@ from typing import Optional
 
 
 # ══════════════════════════════════════════════════════════════════
-# KEYWORD MAPS — ánh xạ từ khóa → domain value (KB vocab)
+# Danh sách từ khóa để nhận diện mục đích và ưu tiên từ câu người dùng
 # ══════════════════════════════════════════════════════════════════
 
-# Thứ tự quan trọng: pattern dài hơn đặt trước để tránh khớp sai
+# Đặt từ khóa dài hơn trước để tránh nhận nhầm (ví dụ: "đồ họa" trước "đồ")
 MUC_DICH_KEYWORDS: list[tuple[str, list[str]]] = [
     ("graphics",  ["đồ họa", "thiết kế", "render", "photoshop", "illustrator",
                    "3d", "blender", "autocad", "sketchup"]),
@@ -41,7 +43,7 @@ UU_TIEN_KEYWORDS: list[tuple[str, list[str]]] = [
     ("compact",     ["nhỏ gọn", "mini", "compact", "itx", "nhỏ", "gọn nhẹ"]),
 ]
 
-# Patterns nhận dạng số tiền VND — thứ tự từ cụ thể đến tổng quát
+# Các mẫu regex nhận diện số tiền VND — đặt mẫu cụ thể trước, tổng quát sau
 _MONEY_PATTERNS: list[tuple[re.Pattern, callable]] = [
     # "15.5 triệu" / "15,5 triệu" (thập phân với dấu chấm/phẩy)
     (re.compile(r'(\d+)[.,](\d+)\s*triệu', re.IGNORECASE),
@@ -59,16 +61,15 @@ _MONEY_PATTERNS: list[tuple[re.Pattern, callable]] = [
 
 
 # ══════════════════════════════════════════════════════════════════
-# PREDICATE FUNCTIONS (theo UNIT_9)
+# Các hàm nhận diện thông tin từ câu người dùng
 # ══════════════════════════════════════════════════════════════════
 
 def MucDich(text: str) -> tuple[Optional[str], Optional[str]]:
     """
-    Predicate MucDich(x, value):
-      ∃ keyword ∈ text → trả về (value, keyword_found)
-      Dùng lượng từ tồn tại (∃): chỉ cần tìm thấy 1 keyword là đủ suy ra mục đích.
+    Tìm mục đích sử dụng trong câu người dùng nhập.
+    Chỉ cần tìm thấy một từ khóa là đủ để xác định mục đích.
 
-    Returns: (value, matched_keyword) hoặc (None, None)
+    Trả về: (mục đích tìm được, từ khóa đã khớp) hoặc (None, None) nếu không tìm thấy.
     """
     t = text.lower()
     for value, keywords in MUC_DICH_KEYWORDS:
@@ -80,12 +81,11 @@ def MucDich(text: str) -> tuple[Optional[str], Optional[str]]:
 
 def NganSach(text: str) -> tuple[Optional[int], Optional[str]]:
     """
-    Predicate NganSach(x, n):
-      ∀ pattern ∈ _MONEY_PATTERNS → thử lần lượt đến khi match → trả về n (VND)
-      Dùng lượng từ với mọi (∀): duyệt toàn bộ pattern set.
+    Tìm số tiền ngân sách trong câu người dùng nhập.
+    Thử lần lượt các mẫu nhận diện khác nhau cho đến khi tìm được số hợp lệ.
 
-    Sanity check: chỉ chấp nhận 1.000.000đ – 500.000.000đ.
-    Returns: (vnd_value, matched_text) hoặc (None, None)
+    Chỉ chấp nhận từ 1 triệu đến 500 triệu đồng.
+    Trả về: (số tiền bằng VNĐ, đoạn văn bản đã khớp) hoặc (None, None) nếu không tìm thấy.
     """
     for pattern, converter in _MONEY_PATTERNS:
         m = pattern.search(text)
@@ -101,10 +101,9 @@ def NganSach(text: str) -> tuple[Optional[int], Optional[str]]:
 
 def UuTien(text: str) -> tuple[Optional[str], Optional[str]]:
     """
-    Predicate UuTien(x, value):
-      ∃ keyword ưu tiên ∈ text → trả về (value, keyword_found)
+    Tìm ưu tiên của người dùng (hiệu năng, tiết kiệm, yên tĩnh, nhỏ gọn) trong câu.
 
-    Returns: (value, matched_keyword) hoặc (None, None)
+    Trả về: (ưu tiên tìm được, từ khóa đã khớp) hoặc (None, None) nếu không tìm thấy.
     """
     t = text.lower()
     for value, keywords in UU_TIEN_KEYWORDS:
@@ -115,24 +114,18 @@ def UuTien(text: str) -> tuple[Optional[str], Optional[str]]:
 
 
 # ══════════════════════════════════════════════════════════════════
-# PUBLIC API
+# Hàm công khai — streamlit_app.py gọi để phân tích câu chat
 # ══════════════════════════════════════════════════════════════════
 
 def extract_predicates(text: str) -> dict:
     """
-    Áp dụng 3 predicate functions lên câu chat tự nhiên.
+    Phân tích câu người dùng nhập và lấy ra 3 thông tin cần thiết.
 
-    Returns dict facts cho Working Memory:
-      {
-        "muc_dich":  str | None,
-        "ngan_sach": int | None,
-        "uu_tien":   str,          # "" nếu không tìm thấy
-        "_matched": {              # internal: keyword đã khớp (cho explain)
-          "muc_dich":  str | None,
-          "ngan_sach": str | None,
-          "uu_tien":   str | None,
-        }
-      }
+    Tham số:
+        text: câu người dùng nhập vào (ví dụ: "build máy gaming 15 triệu")
+    Trả về:
+        dict chứa muc_dich, ngan_sach, uu_tien đã nhận diện được,
+        và _matched ghi lại từ khóa đã khớp (dùng để giải thích).
     """
     muc_dich_val, muc_dich_kw   = MucDich(text)
     ngan_sach_val, ngan_sach_kw = NganSach(text)
@@ -152,13 +145,14 @@ def extract_predicates(text: str) -> dict:
 
 def explain_predicates(facts: dict) -> list[str]:
     """
-    Trả về list string giải thích từng predicate đã extract,
-    theo ký hiệu logic vị từ (UNIT_9).
+    Tạo danh sách giải thích hiển thị cho người dùng biết hệ thống nhận diện được gì.
 
-    Ví dụ:
-      ["MucDich(user, gaming) ← tìm thấy keyword 'gaming'",
-       "NganSach(user, 15.000.000) ← extract từ '15 triệu'",
-       "UuTien(user, performance) ← tìm thấy 'ưu tiên gpu'"]
+    Tham số:
+        facts: kết quả từ hàm extract_predicates()
+    Trả về:
+        Danh sách các dòng giải thích, ví dụ:
+        ["MucDich(user, gaming) ← tìm thấy keyword 'gaming'",
+         "NganSach(user, 15.000.000) ← extract từ '15 triệu'"]
     """
     matched = facts.get("_matched", {})
     result: list[str] = []

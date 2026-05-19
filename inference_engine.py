@@ -1,14 +1,13 @@
 """
-inference_engine.py — Forward Chaining Inference Engine
-=========================================================
-Nhận WorkingMemory (facts) → validate input → duyệt rules → cập nhật WM
-→ làm giàu output chi tiết → trả về WM đã điền đầy đủ.
+inference_engine.py — Bộ xử lý chạy toàn bộ các luật tư vấn
+==============================================================
+Nhận thông tin người dùng → kiểm tra hợp lệ → chạy từng luật → trả về kết quả.
 
-Luồng xử lý trong run():
-  [0] validate_input()   — chuẩn hóa & kiểm tra đầu vào, ghi warning nếu lỗi
-  [1] Forward Chaining   — lặp tới fixpoint, mỗi rule chỉ fire 1 lần
-  [2] _apply_defaults()  — đảm bảo không có field nào trống
-  [3] _enrich_output()   — tra dict để điền wattage, TDP, dung lượng storage
+Các bước trong hàm run():
+  [0] validate_input()   — kiểm tra và chuẩn hóa thông tin đầu vào
+  [1] Chạy luật          — lặp liên tục cho đến khi không còn luật nào áp dụng được
+  [2] _apply_defaults()  — điền giá trị mặc định cho các trường còn trống
+  [3] _enrich_output()   — tra bảng để điền công suất nguồn, tản nhiệt, dung lượng ổ
 """
 
 from knowledge_base import (
@@ -27,16 +26,15 @@ class ForwardChaining:
         self.rules: list[Rule] = get_all_rules()  # đã sort theo priority giảm dần
 
     # ──────────────────────────────────────────────────────────────
-    # BƯỚC 0 — Validate & chuẩn hóa input
+    # BƯỚC 0 — Kiểm tra và chuẩn hóa thông tin đầu vào
     # ──────────────────────────────────────────────────────────────
     @staticmethod
     def validate_input(wm: WorkingMemory) -> list[str]:
         """
-        Kiểm tra tính hợp lệ của WorkingMemory đầu vào.
+        Kiểm tra thông tin người dùng nhập vào có hợp lệ không.
 
-        Side effect: tự động lowercase + strip whitespace cho muc_dich, uu_tien;
-                     ép kiểu ngan_sach sang int (0 nếu không parse được).
-        Returns:     list[str] — danh sách lỗi/cảnh báo (rỗng = hoàn toàn hợp lệ)
+        Tự động chuẩn hóa: chuyển muc_dich và uu_tien về chữ thường, bỏ khoảng trắng thừa.
+        Trả về danh sách thông báo lỗi (danh sách rỗng = không có lỗi nào).
         """
         errors: list[str] = []
 
@@ -94,12 +92,18 @@ class ForwardChaining:
     # ──────────────────────────────────────────────────────────────
     def run(self, wm: WorkingMemory) -> WorkingMemory:
         """
-        Thuật toán Forward Chaining:
-          - Bước 0: validate_input() — chuẩn hóa & kiểm tra đầu vào
-          - Bước 1: Lặp cho đến khi không còn rule nào fire được (fixpoint)
-                    Mỗi rule chỉ fire 1 lần (tránh vòng lặp vô hạn)
-          - Bước 2: _apply_defaults() — đảm bảo không field nào trống
-          - Bước 3: _enrich_output() — điền thông tin chi tiết từ lookup dicts
+        Hàm chạy toàn bộ quá trình tư vấn từ thông tin người dùng.
+
+        Tham số:
+            wm: đối tượng chứa ngân sách, mục đích, ưu tiên của người dùng
+        Trả về:
+            wm đã được điền đầy đủ thông tin (tier linh kiện, ngân sách, ...)
+
+        Các bước:
+          - Bước 0: kiểm tra thông tin đầu vào
+          - Bước 1: lặp liên tục cho đến khi không còn luật nào được áp dụng thêm
+          - Bước 2: điền giá trị mặc định cho trường còn trống
+          - Bước 3: tra bảng để điền công suất, TDP, dung lượng chi tiết
         """
 
         # ── Bước 0: Validate input ────────────────────────────────
@@ -110,7 +114,7 @@ class ForwardChaining:
             for err in errors:
                 wm.warnings.append(err)
 
-        # ── Bước 1: Forward Chaining ──────────────────────────────
+        # ── Bước 1: Lặp qua các luật cho đến khi không còn luật nào khớp ──
         fired_ids: set[str] = set()
         changed = True
 
@@ -120,20 +124,20 @@ class ForwardChaining:
                 if rule.id in fired_ids:
                     continue
 
-                # Kiểm tra condition — bắt exception để không crash toàn bộ engine
+                # Kiểm tra điều kiện của luật, bắt lỗi để không làm sập chương trình
                 try:
                     cond_met = rule.condition(wm)
                 except Exception:
                     cond_met = False
 
                 if cond_met:
-                    # Snapshot WM trước khi fire để detect thay đổi
+                    # Lưu trạng thái trước khi áp dụng luật để biết có thay đổi không
                     before = {
                         k: v for k, v in wm.__dict__.items()
                         if k not in ("explanation", "fired_rules", "warnings")
                     }
 
-                    # Fire rule → action cập nhật WM
+                    # Áp dụng hành động của luật
                     try:
                         rule.action(wm)
                     except Exception as e:
@@ -141,15 +145,14 @@ class ForwardChaining:
                         fired_ids.add(rule.id)
                         continue
 
-                    # Ghi metadata — CHỈ engine được phép append explanation
-                    # (action lambda KHÔNG được gọi wm.explanation.append())
+                    # Ghi lại luật đã chạy và lý do (chỉ engine ghi, không phải action)
                     wm.fired_rules.append(rule.id)
                     wm.explanation.append(
                         f"[{rule.id}] {rule.name}: {rule.explanation}"
                     )
                     fired_ids.add(rule.id)
 
-                    # Nếu WM thay đổi → cần lặp lại để các rule khác có cơ hội fire
+                    # Nếu có thay đổi thì cần chạy lại vòng lặp để kiểm tra luật khác
                     after = {
                         k: v for k, v in wm.__dict__.items()
                         if k not in ("explanation", "fired_rules", "warnings")
@@ -169,7 +172,7 @@ class ForwardChaining:
     # BƯỚC 2 — Apply defaults
     # ──────────────────────────────────────────────────────────────
     def _apply_defaults(self, wm: WorkingMemory):
-        """Đảm bảo không có field nào bị trống khi trả về."""
+        """Điền giá trị mặc định vào các trường còn trống, tránh lỗi khi hiển thị kết quả."""
         if not wm.cpu_tier:       wm.cpu_tier       = "mid-range"
         if not wm.gpu_tier:       wm.gpu_tier        = "none"       # [BUG5] 'none' an toàn hơn vì CSP sẽ tự chọn GPU phù hợp theo muc_dich
         if not wm.ram_capacity:   wm.ram_capacity    = 16
@@ -195,9 +198,8 @@ class ForwardChaining:
     # ──────────────────────────────────────────────────────────────
     def _enrich_output(self, wm: WorkingMemory):
         """
-        Làm giàu output bằng cách tra lookup dicts từ knowledge_base.
-        Được gọi SAU khi Forward Chaining và _apply_defaults() đã hoàn thành,
-        đảm bảo psu_tier, cooler_type, storage_config đã có giá trị.
+        Tra bảng để điền thêm thông tin chi tiết sau khi đã chạy xong các luật.
+        Ví dụ: từ psu_tier="mid" → điền psu_wattage_min=650W.
         """
         # Tra công suất nguồn theo tier PSU
         wm.psu_wattage_min = PSU_TIER_WATTAGE.get(wm.psu_tier, 0)

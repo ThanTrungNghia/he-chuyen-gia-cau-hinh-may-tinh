@@ -1,29 +1,27 @@
 """
-knowledge_base.py — Knowledge Base của hệ chuyên gia tư vấn cấu hình PC
-=========================================================================
-Chứa:
-  - Ngưỡng ngân sách (CONSTANTS block)
-  - Lookup dicts: PSU_TIER_WATTAGE, COOLER_TDP_SUPPORT, STORAGE_CAPACITY
-  - 31 luật IF-THEN (R01–R31, R04 tách thành R04a/R04b)
-  - Cấu trúc Working Memory
-  - Hàm get_all_rules() để Inference Engine nạp vào
+knowledge_base.py — Chứa toàn bộ luật và cấu trúc dữ liệu của hệ thống tư vấn
+================================================================================
+File này là "bộ não" của hệ thống, bao gồm:
+  - Các mốc ngân sách để phân loại tầm giá
+  - Bảng tra cứu công suất nguồn, tản nhiệt, dung lượng ổ cứng
+  - 31 luật IF-THEN để xác định linh kiện phù hợp cho người dùng
+  - Cấu trúc lưu thông tin người dùng trong quá trình tư vấn
+  - Hàm get_all_rules() để các module khác lấy danh sách luật
 
-Nguyên tắc thiết kế:
-  - Mỗi luật có ID duy nhất (R01–R31, R04a, R04b)
-  - Luật cụ thể hơn (nhiều điều kiện hơn) được ưu tiên trước → specificity ordering
-  - Mỗi luật khi kích hoạt sẽ ghi lý do vào explanation[] — DO inference_engine quản lý
-  - action lambda KHÔNG được gọi wm.explanation.append() — chỉ engine mới ghi explanation
-  - Không có hardcode sản phẩm cụ thể — KB chỉ xác định TIER
-    (CSP checker sẽ map tier → sản phẩm thực từ products.json)
+Lưu ý:
+  - Mỗi luật có ID riêng (R01–R31, R04a, R04b)
+  - Luật có nhiều điều kiện hơn được ưu tiên chạy trước
+  - Chỉ xác định tầm giá (tier) linh kiện, không gán tên sản phẩm cụ thể
+  - Module csp_checker.py sẽ tìm sản phẩm thực tế dựa trên tier
 
-Nhóm 1  (R01–R05):    Office builds
-Nhóm 2  (R06–R11):    Gaming builds
+Nhóm 1  (R01–R05):    Máy văn phòng
+Nhóm 2  (R06–R11):    Máy gaming
 Nhóm 3  (R12–R15):    Đồ họa / Workstation
-Nhóm 4  (R16–R17):    Streaming / Content Creation
-Nhóm 5  (R18–R20):    Override rules (ưu tiên người dùng)
-Nhóm 6  (R21–R24):    Study / Editing
-Nhóm 7  (R25–R27):    Override compact / quiet / value
-Nhóm 8  (R28–R31):    Gap coverage bổ sung
+Nhóm 4  (R16–R17):    Streaming
+Nhóm 5  (R18–R20):    Điều chỉnh theo ưu tiên người dùng
+Nhóm 6  (R21–R24):    Học tập / Dựng phim
+Nhóm 7  (R25–R27):    Điều chỉnh nhỏ gọn / yên tĩnh / tiết kiệm
+Nhóm 8  (R28–R31):    Các trường hợp bổ sung còn thiếu
 """
 
 from dataclasses import dataclass, field
@@ -31,8 +29,8 @@ from typing import Callable
 
 
 # ══════════════════════════════════════════════════════════════════
-# CONSTANTS — Ngưỡng ngân sách (VNĐ)
-# Tập trung vào một chỗ để dễ bảo trì, tránh magic numbers trong lambda
+# CONSTANTS — Các mốc ngân sách (VNĐ)
+# Đặt tập trung một chỗ để dễ sửa, tránh viết số cứng rải rác trong code
 # ══════════════════════════════════════════════════════════════════
 
 # ── Office ────────────────────────────────────────────────────────
@@ -70,8 +68,8 @@ BUDGET_PERF_OVERRIDE = 20_000_000   # R18: ngưỡng tối thiểu để nâng G
 
 
 # ══════════════════════════════════════════════════════════════════
-# PSU_TIER_WATTAGE — Công suất nguồn tối thiểu gợi ý theo tier
-# Inference Engine sẽ tra dict này để điền wm.psu_wattage_min
+# PSU_TIER_WATTAGE — Công suất nguồn tối thiểu theo tầm giá
+# Dùng để tra cứu và điền vào trường psu_wattage_min khi tư vấn
 # ══════════════════════════════════════════════════════════════════
 PSU_TIER_WATTAGE: dict[str, int] = {
     "basic":  450,    # đủ cho build iGPU hoặc GPU budget TDP thấp
@@ -82,8 +80,8 @@ PSU_TIER_WATTAGE: dict[str, int] = {
 
 
 # ══════════════════════════════════════════════════════════════════
-# COOLER_TDP_SUPPORT — Công suất nhiệt tối đa cooler có thể tản (W)
-# Dùng để kiểm tra xem cooler có phù hợp với CPU TDP không
+# COOLER_TDP_SUPPORT — Mức nhiệt tối đa mỗi loại tản nhiệt có thể xử lý (W)
+# Dùng để kiểm tra xem tản nhiệt có đủ mát cho CPU hay không
 # ══════════════════════════════════════════════════════════════════
 COOLER_TDP_SUPPORT: dict[str, int] = {
     "stock":      65,    # cooler đi kèm CPU — chỉ đủ cho TDP cơ bản (65W)
@@ -96,8 +94,8 @@ COOLER_TDP_SUPPORT: dict[str, int] = {
 
 
 # ══════════════════════════════════════════════════════════════════
-# STORAGE_CAPACITY — Dung lượng gợi ý theo kiểu cấu hình storage
-# nvme_gb: dung lượng ổ NVMe/SSD chính; hdd_gb: ổ cứng HDD phụ
+# STORAGE_CAPACITY — Dung lượng ổ cứng gợi ý cho từng kiểu cấu hình
+# nvme_gb: ổ cứng chính (SSD/NVMe); hdd_gb: ổ lưu trữ phụ (HDD)
 # ══════════════════════════════════════════════════════════════════
 STORAGE_CAPACITY: dict[str, dict[str, int]] = {
     "ssd-only":  {"nvme_gb":  500, "hdd_gb":    0},   # SSD SATA 500GB đủ dùng văn phòng
@@ -108,7 +106,8 @@ STORAGE_CAPACITY: dict[str, dict[str, int]] = {
 
 
 # ══════════════════════════════════════════════════════════════════
-# WORKING MEMORY — trạng thái hiện tại của hệ thống
+# WORKING MEMORY — Nơi lưu trữ thông tin người dùng và kết quả tư vấn
+# Được tạo khi người dùng nhập yêu cầu, các luật sẽ dần điền thêm thông tin
 # ══════════════════════════════════════════════════════════════════
 @dataclass
 class WorkingMemory:
@@ -168,17 +167,17 @@ class Rule:
 
 # ══════════════════════════════════════════════════════════════════
 # 31 LUẬT IF-THEN
-# QUAN TRỌNG: action lambda KHÔNG được gọi wm.explanation.append()
-#             Inference Engine tự ghi explanation sau mỗi rule fire.
-#             action chỉ được gọi: wm.__dict__.update() và wm.warnings.append()
+# Lưu ý: phần action của luật KHÔNG được ghi vào explanation
+#         Chỉ có bộ xử lý (inference_engine.py) mới được phép ghi giải thích
+#         action chỉ được gọi: wm.__dict__.update() và wm.warnings.append()
 # ══════════════════════════════════════════════════════════════════
 
 def _rules() -> list[Rule]:
     return [
 
         # ─────────────────────────────────────────────────────────
-        # NHÓM 1 — OFFICE BUILDS
-        # Ưu tiên: tiết kiệm điện, yên tĩnh, iGPU, không cần GPU rời
+        # Nhóm 1: Luật cho máy tính văn phòng
+        # Không cần card đồ họa rời, ưu tiên tiết kiệm điện và chi phí
         # ─────────────────────────────────────────────────────────
 
         Rule(
@@ -315,8 +314,8 @@ def _rules() -> list[Rule]:
         ),
 
         # ─────────────────────────────────────────────────────────
-        # NHÓM 2 — GAMING BUILDS
-        # Ưu tiên: GPU mạnh, balance CPU-GPU, không bottleneck
+        # Nhóm 2: Luật cho máy gaming
+        # Ưu tiên card đồ họa mạnh, cân bằng CPU và GPU
         # ─────────────────────────────────────────────────────────
 
         Rule(
@@ -461,8 +460,8 @@ def _rules() -> list[Rule]:
         ),
 
         # ─────────────────────────────────────────────────────────
-        # NHÓM 3 — ĐỒ HỌA / WORKSTATION
-        # Ưu tiên: VRAM nhiều, CPU nhiều nhân, RAM lớn
+        # Nhóm 3: Luật cho máy đồ họa / workstation
+        # Cần VRAM nhiều, CPU nhiều nhân, RAM lớn để render và xử lý ảnh/video
         # ─────────────────────────────────────────────────────────
 
         Rule(
@@ -563,8 +562,8 @@ def _rules() -> list[Rule]:
         ),
 
         # ─────────────────────────────────────────────────────────
-        # NHÓM 4 — STREAMING / CONTENT CREATION
-        # Ưu tiên: CPU nhiều nhân (encode), GPU gaming, RAM lớn
+        # Nhóm 4: Luật cho máy streaming
+        # Cần CPU nhiều nhân để vừa chơi game vừa encode video stream
         # ─────────────────────────────────────────────────────────
 
         Rule(
@@ -616,9 +615,8 @@ def _rules() -> list[Rule]:
         ),
 
         # ─────────────────────────────────────────────────────────
-        # NHÓM 5 — LUẬT ĐIỀU CHỈNH THEO ƯU TIÊN (Override rules)
-        # Các luật này KHÔNG ghi đè toàn bộ WM mà chỉ điều chỉnh
-        # một số field cụ thể sau khi nhóm 1-4 đã chạy
+        # Nhóm 5: Luật điều chỉnh theo ưu tiên người dùng
+        # Chỉ thay đổi một vài trường cụ thể sau khi nhóm 1-4 đã chạy
         # ─────────────────────────────────────────────────────────
 
         Rule(
@@ -687,7 +685,7 @@ def _rules() -> list[Rule]:
         ),
 
         # ─────────────────────────────────────────────────────────
-        # NHÓM 6 — STUDY / EDITING
+        # Nhóm 6: Luật cho máy học tập / lập trình / dựng phim
         # ─────────────────────────────────────────────────────────
 
         Rule(
@@ -782,8 +780,8 @@ def _rules() -> list[Rule]:
         ),
 
         # ─────────────────────────────────────────────────────────
-        # NHÓM 7 — OVERRIDE MỚI (R25–R27)
-        # Priority 60-70: chạy sau các rule chính để override cụ thể
+        # Nhóm 7: Điều chỉnh nhỏ gọn, yên tĩnh, tiết kiệm (R25–R27)
+        # Chạy sau các nhóm chính để ghi đè một số lựa chọn cụ thể
         # ─────────────────────────────────────────────────────────
 
         Rule(
@@ -846,8 +844,8 @@ def _rules() -> list[Rule]:
         ),
 
         # ─────────────────────────────────────────────────────────
-        # NHÓM 8 — GAP COVERAGE BỔ SUNG (R28–R31)
-        # Các kịch bản bị hở được phát hiện qua đánh giá coverage
+        # Nhóm 8: Các luật bổ sung cho trường hợp còn thiếu (R28–R31)
+        # Phát hiện và bổ sung sau khi kiểm tra coverage
         # ─────────────────────────────────────────────────────────
 
         Rule(
@@ -934,10 +932,10 @@ def _rules() -> list[Rule]:
 
 
 # ══════════════════════════════════════════════════════════════════
-# PUBLIC API — Inference Engine gọi hàm này
+# Hàm công khai — các module khác gọi hàm này để lấy danh sách luật
 # ══════════════════════════════════════════════════════════════════
 def get_all_rules() -> list[Rule]:
-    """Trả về tất cả rules đã sắp xếp theo priority giảm dần."""
+    """Trả về toàn bộ luật đã được sắp xếp theo độ ưu tiên (cao trước)."""
     return sorted(_rules(), key=lambda r: r.priority, reverse=True)
 
 

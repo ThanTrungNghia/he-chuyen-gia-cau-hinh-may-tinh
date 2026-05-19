@@ -1,19 +1,16 @@
 """
-forward_chaining.py — Forward Chaining wrapper với phân bổ ngân sách
-=====================================================================
-Pipeline 2 stage:
-  Stage 1 — IE tier-based (knowledge_base.py + inference_engine.py)
-            → 31 rules R01–R31 chọn tier cho từng linh kiện
-  Stage 2 — Budget allocation (rules R32–R40 trong file này)
-            → phân bổ % ngân sách cho 6 linh kiện chính + min specs
+forward_chaining.py — Kết nối luật với dữ liệu thực tế, phân bổ ngân sách
+==========================================================================
+File này thực hiện 2 bước:
+  Bước 1 — Chạy 31 luật từ knowledge_base.py để xác định tầm giá linh kiện
+  Bước 2 — Chạy 9 luật trong file này (R32–R40) để tính ngân sách cho từng linh kiện
 
-Cả 2 stage đều dùng vòng lặp fixpoint — suy luận theo chuỗi luật IF-THEN
-đến khi không còn rule nào fire được, mỗi rule fire đúng 1 lần.
+Cả 2 bước đều lặp cho đến khi không còn luật nào áp dụng được nữa.
 
-Output: WorkingMemory đã enriched với:
-  - tier (từ stage 1): cpu_tier, gpu_tier, ram_capacity, ...
-  - budget (từ stage 2): cpu_budget, gpu_budget, ram_budget, ...
-  - min specs: ram_min_gb, vram_min_gb, storage_min_gb
+Kết quả trả về:
+  - Tầm giá linh kiện (từ bước 1): cpu_tier, gpu_tier, ram_capacity, ...
+  - Ngân sách từng linh kiện (từ bước 2): cpu_budget, gpu_budget, ram_budget, ...
+  - Yêu cầu tối thiểu: ram_min_gb, vram_min_gb, storage_min_gb
 """
 
 from typing import Callable
@@ -24,10 +21,8 @@ from inference_engine import ForwardChaining
 
 
 # ══════════════════════════════════════════════════════════════════
-# VOCAB MAPPING — KB tier ↔ CSV tier
-# KB output dùng english tier ("mid-range", "gaming-mid", ...),
-# nhưng cột tier trong CSV (clean_data.py) dùng giá trị ngắn gọn hơn.
-# CSP checker sẽ dùng các map này để filter products theo tier.
+# Bảng chuyển đổi tầm giá từ tên đầy đủ sang tên ngắn trong file CSV
+# Ví dụ: "mid-range" trong luật → "mid" trong cột cpu_tier của Data_CPU.csv
 # ══════════════════════════════════════════════════════════════════
 
 TIER_MAP_CPU: dict[str, str] = {
@@ -48,7 +43,7 @@ TIER_MAP_GPU: dict[str, str | None] = {
     "workstation":  "high",
 }
 
-# Map cpu_tier → "overall tier" để chọn tỉ lệ phân bổ ngân sách
+# Chuyển đổi tầm giá CPU sang tên dùng trong bảng phân bổ ngân sách
 OVERALL_TIER: dict[str, str] = {
     "budget":    "budget",
     "mid-range": "mid",
@@ -56,9 +51,9 @@ OVERALL_TIER: dict[str, str] = {
     "ultra":     "extreme",
 }
 
-# Tỉ lệ phân bổ ngân sách cho 6 linh kiện chính theo overall tier.
-# Tổng mỗi hàng = 100%. Case + Cooler được tính riêng trong filter_domains
-# (case = 6% ngân_sách, cooler = 4% ngân_sách — xem csp_checker.py).
+# Tỉ lệ % ngân sách phân bổ cho 6 linh kiện chính theo tầm giá.
+# Tổng mỗi hàng = 100%. Vỏ máy và tản nhiệt tính riêng trong csp_checker.py
+# (vỏ = 6% ngân sách, tản nhiệt = 4% ngân sách).
 BUDGET_PERCENTS: dict[str, dict[str, float]] = {
     "budget":  {"cpu": 0.25, "gpu": 0.30, "ram": 0.15, "mb": 0.15, "psu": 0.08, "storage": 0.07},
     "mid":     {"cpu": 0.22, "gpu": 0.35, "ram": 0.13, "mb": 0.15, "psu": 0.07, "storage": 0.08},
@@ -66,7 +61,7 @@ BUDGET_PERCENTS: dict[str, dict[str, float]] = {
     "extreme": {"cpu": 0.18, "gpu": 0.45, "ram": 0.11, "mb": 0.12, "psu": 0.06, "storage": 0.08},
 }
 
-# Min specs theo muc_dich (R39). Có thể bị override bởi gpu_tier="none".
+# Cấu hình tối thiểu theo mục đích sử dụng (dùng ở luật R39).
 MIN_SPECS: dict[str, dict[str, int]] = {
     "office":    {"ram_min_gb":  8, "vram_min_gb":  0, "storage_min_gb":  256},
     "study":     {"ram_min_gb": 16, "vram_min_gb":  0, "storage_min_gb":  512},
@@ -78,8 +73,8 @@ MIN_SPECS: dict[str, dict[str, int]] = {
 
 
 # ══════════════════════════════════════════════════════════════════
-# BUDGET RULE — cấu trúc nhẹ cho 8 rules R32–R39
-# Tách khỏi knowledge_base.Rule để không bắt buộc phải có priority/name
+# BudgetRule — cấu trúc đơn giản cho các luật phân bổ ngân sách (R32–R40)
+# Không cần priority/name như luật trong knowledge_base.py
 # ══════════════════════════════════════════════════════════════════
 @dataclass
 class BudgetRule:
@@ -90,7 +85,7 @@ class BudgetRule:
 
 
 def _alloc(wm: WorkingMemory, tier_key: str) -> None:
-    """Helper: gán 6 budget field theo tỉ lệ BUDGET_PERCENTS[tier_key]."""
+    """Tính và gán ngân sách cho 6 linh kiện chính theo tỉ lệ đã định sẵn."""
     pct = BUDGET_PERCENTS[tier_key]
     wm.cpu_budget     = wm.ngan_sach * pct["cpu"]
     wm.gpu_budget     = wm.ngan_sach * pct["gpu"]
@@ -102,7 +97,7 @@ def _alloc(wm: WorkingMemory, tier_key: str) -> None:
 
 BUDGET_RULES: list[BudgetRule] = [
 
-    # ── NHÓM A: Phân bổ ngân sách theo cpu_tier (R32–R35) ────────
+    # ── Nhóm A: Tính ngân sách cho từng linh kiện theo tầm giá (R32–R35) ──
     BudgetRule(
         id="R32",
         doc="IF cpu_tier=budget AND chưa phân bổ THEN gán % budget tier",
@@ -128,8 +123,7 @@ BUDGET_RULES: list[BudgetRule] = [
         action=lambda wm: _alloc(wm, "extreme"),
     ),
 
-    # ── NHÓM B: Re-allocation khi không cần GPU rời (R36) ─────────
-    # Không cần GPU rời → chuyển phần lớn gpu_budget sang cpu_budget
+    # ── Nhóm B: Nếu không cần card rời thì chuyển tiền sang CPU (R36) ─────
     BudgetRule(
         id="R36",
         doc="IF gpu_tier=none AND gpu_budget>0 THEN dồn 60% gpu_budget sang cpu_budget",
@@ -138,7 +132,7 @@ BUDGET_RULES: list[BudgetRule] = [
                          setattr(wm, "gpu_budget", 0.0),
     ),
 
-    # ── NHÓM C: Override theo ưu tiên (R37–R38) ───────────────────
+    # ── Nhóm C: Điều chỉnh ngân sách theo ưu tiên người dùng (R37–R38) ────
     BudgetRule(
         id="R37",
         doc="IF uu_tien=performance AND đã phân bổ THEN +5% gpu, -5% cpu",
@@ -173,7 +167,7 @@ BUDGET_RULES: list[BudgetRule] = [
         ),
     ),
 
-    # ── NHÓM D: Min specs theo muc_dich (R39) ─────────────────────
+    # ── Nhóm D: Xác định cấu hình tối thiểu theo mục đích (R39) ───────────
     BudgetRule(
         id="R39",
         doc="IF chưa có ram_min_gb THEN tra MIN_SPECS[muc_dich] gán min specs",
@@ -181,9 +175,8 @@ BUDGET_RULES: list[BudgetRule] = [
         action=lambda wm: _set_min_specs(wm),
     ),
 
-    # ── NHÓM E: Tối đa hóa ngân sách (R40) ───────────────────────
-    # Sau khi phân bổ, tăng gpu_budget và cpu_budget để sử dụng 88-95% ngân sách
-    # thay vì 80-85%. C5 trong CSP vẫn giới hạn tổng chi tiêu thực tế.
+    # ── Nhóm E: Tăng thêm ngân sách GPU/CPU để tận dụng tốt hơn (R40) ────
+    # Nới rộng lên 88-95% thay vì 80-85%, CSP vẫn kiểm soát tổng tiền thực.
     BudgetRule(
         id="R40",
         doc="Tăng gpu_budget thêm 10%, cpu_budget thêm 5% để tối đa hóa hiệu năng trong ngân sách",
@@ -198,7 +191,7 @@ BUDGET_RULES: list[BudgetRule] = [
 
 
 def _set_min_specs(wm: WorkingMemory) -> None:
-    """R39 helper: tra MIN_SPECS, override vram_min_gb=0 nếu gpu_tier='none'."""
+    """Điền yêu cầu tối thiểu về RAM/VRAM/ổ cứng theo mục đích sử dụng."""
     spec = MIN_SPECS.get(wm.muc_dich, MIN_SPECS["office"])
     wm.ram_min_gb     = spec["ram_min_gb"]
     wm.vram_min_gb    = spec["vram_min_gb"] if wm.gpu_tier != "none" else 0
@@ -206,21 +199,20 @@ def _set_min_specs(wm: WorkingMemory) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════
-# PUBLIC API — pipeline.recommend() gọi hàm này
+# Hàm chính — streamlit_app.py gọi hàm này để chạy toàn bộ quá trình tư vấn
 # ══════════════════════════════════════════════════════════════════
 def run_forward_chaining(wm: WorkingMemory) -> tuple[WorkingMemory, list[str]]:
     """
-    2-stage Forward Chaining:
-      Stage 1: ForwardChaining (IE) — 31 rules tier-based
-      Stage 2: BUDGET_RULES — 8 rules phân bổ ngân sách + min specs
+    Chạy toàn bộ quá trình suy luận tự động từ thông tin người dùng.
 
-    Cả 2 stage dùng vòng lặp fixpoint (Modus Ponens):
-      while có rule mới fire được:
-          for rule in rules:
-              if condition(wm) and rule chưa fire:
-                  action(wm); fired.add(rule.id)
+    Tham số:
+        wm: thông tin người dùng (ngân sách, mục đích, ưu tiên)
+    Trả về:
+        (wm đã được điền đầy đủ, danh sách ID các luật đã chạy)
 
-    Returns: (wm đã enriched, list ID rule đã fire — explanation facility)
+    Bước 1: Chạy 31 luật để xác định tầm giá từng linh kiện
+    Bước 2: Chạy 9 luật để tính ngân sách cho từng linh kiện và yêu cầu tối thiểu
+    Mỗi bước lặp đến khi không còn luật nào khớp, mỗi luật chỉ chạy 1 lần.
     """
     # ── Stage 1: tier-based IE ────────────────────────────────────
     ie = ForwardChaining()

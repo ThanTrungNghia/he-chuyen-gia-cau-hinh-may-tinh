@@ -1,9 +1,14 @@
 """
-streamlit_app.py — UI demo Hệ Chuyên Gia Tư Vấn Cấu Hình Máy Tính
-====================================================================
-Pipeline: Suy luận tự động → Kiểm tra ràng buộc → Tối ưu hóa lựa chọn
-Chat AI: nhận diện ngân sách, mục đích, ưu tiên từ câu tự nhiên.
-Chạy: streamlit run streamlit_app.py
+streamlit_app.py — Giao diện chính của ứng dụng tư vấn cấu hình máy tính
+==========================================================================
+File này tạo giao diện web cho người dùng, bao gồm:
+  - Thanh bên: nhập ngân sách, mục đích, ưu tiên và bấm nút tư vấn
+  - Tab 1: Hiển thị cấu hình đề xuất tốt nhất
+  - Tab 2: So sánh 3 cấu hình hàng đầu
+  - Tab 3: Thông tin kỹ thuật chi tiết
+  - Tab 4: Chat AI — nhập câu tự nhiên để tư vấn
+
+Chạy ứng dụng: streamlit run streamlit_app.py
 """
 
 import time
@@ -20,7 +25,7 @@ from predicate_extractor import extract_predicates, explain_predicates
 
 
 # ══════════════════════════════════════════════════════════════════
-# CONSTANTS — màu sắc và icon cho từng linh kiện
+# Màu sắc và icon hiển thị cho từng loại linh kiện trên giao diện
 # ══════════════════════════════════════════════════════════════════
 
 COMPONENT_COLORS = {
@@ -67,7 +72,7 @@ RULE_GROUP_COLORS = {
 
 
 # ══════════════════════════════════════════════════════════════════
-# CSS INJECTION — custom styling toàn bộ app
+# Định dạng giao diện — CSS tùy chỉnh cho toàn bộ ứng dụng
 # ══════════════════════════════════════════════════════════════════
 
 CUSTOM_CSS = """
@@ -162,7 +167,7 @@ div[data-testid="metric-container"] {
 
 
 # ══════════════════════════════════════════════════════════════════
-# PIPELINE — cached data + recommend()
+# Hàm gọi pipeline tư vấn và cache dữ liệu
 # ══════════════════════════════════════════════════════════════════
 
 @st.cache_data(show_spinner=False)
@@ -177,6 +182,17 @@ def _total_product_count() -> int:
 
 
 def recommend(ngan_sach: int, muc_dich: str, uu_tien: str = "") -> dict | None:
+    """
+    Hàm gọi toàn bộ pipeline tư vấn: xác định linh kiện → tìm cấu hình → chọn tốt nhất.
+
+    Tham số:
+        ngan_sach: ngân sách người dùng (VNĐ)
+        muc_dich: mục đích sử dụng (office/gaming/graphics/streaming/study/editing)
+        uu_tien: ưu tiên (performance/value/quiet/compact hoặc để trống)
+    Trả về:
+        dict chứa cấu hình tốt nhất, top 3, điểm số, thời gian xử lý,...
+        hoặc None nếu không tìm được cấu hình hợp lệ.
+    """
     t1 = time.time()
     wm = WorkingMemory(ngan_sach=ngan_sach, muc_dich=muc_dich, uu_tien=uu_tien)
     wm, fired = run_forward_chaining(wm)
@@ -187,7 +203,7 @@ def recommend(ngan_sach: int, muc_dich: str, uu_tien: str = "") -> dict | None:
     domains, fb_log = filter_with_fallback(data, wm)
     valid_configs = csp_with_forward_checking(domains, wm.ngan_sach, max_results=50)
 
-    # Nới lỏng ngân sách ±15% và thử lại nếu không tìm được cấu hình
+    # Nếu không tìm được cấu hình, thử lại với ngân sách nới thêm 15%
     if not valid_configs:
         _relax_wm = WorkingMemory(
             ngan_sach=int(ngan_sach * 1.15),
@@ -255,7 +271,7 @@ def config_to_table(config: dict) -> pd.DataFrame:
 
 
 def render_config_html(config: dict, ngan_sach: int) -> str:
-    """Tạo HTML table với badge màu, link mua, highlight linh kiện đắt nhất."""
+    """Tạo bảng HTML hiển thị danh sách linh kiện với màu sắc, badge và link mua."""
     COMP_KEYS = ["cpu", "mainboard", "ram", "vga", "psu", "storage", "case", "cooler"]
     most_expensive = max(COMP_KEYS, key=lambda k: config.get(k, {}).get("price", 0))
     has_stock_cooler = False   # để thêm ghi chú bên dưới nếu dùng box cooler
@@ -320,7 +336,7 @@ def render_config_html(config: dict, ngan_sach: int) -> str:
 
 
 def check_constraints(config: dict, wm: WorkingMemory) -> list[tuple[str, bool, str]]:
-    """Kiểm tra C1-C5 cho cấu hình đã chọn, trả về (tên, pass, mô tả)."""
+    """Kiểm tra 5 điều kiện tương thích cho cấu hình, trả về (tên điều kiện, đạt/không, mô tả)."""
     def _f(x, d=0.0):
         try:
             v = float(x); return v if v == v else d
@@ -404,7 +420,7 @@ def render_top3_card(cfg: dict, wm: WorkingMemory, rank: int) -> None:
 
 
 def render_chat_entry(entry: dict) -> None:
-    """Hiển thị 1 entry chat history — KHÔNG hiện predicates (đã hiện khi phân tích)."""
+    """Hiển thị một câu hỏi và kết quả trong lịch sử chat."""
     st.markdown(
         f'<div class="chat-user">💬 <strong>Câu hỏi:</strong> {entry["text"]}</div>',
         unsafe_allow_html=True,
@@ -516,10 +532,14 @@ if run_btn:
         st.session_state.sidebar_result = r
         st.session_state.show_balloons  = True
     else:
-        st.error(
-            "❌ Không tìm được cấu hình hợp lệ. "
-            "Thử tăng ngân sách hoặc đổi mục đích sử dụng."
-        )
+        # Thông báo lỗi thân thiện theo mục đích sử dụng
+        if muc_dich == "graphics":
+            _err_msg = "Với ngân sách hiện tại chưa đủ cho cấu hình đồ họa chuyên nghiệp. Gợi ý tăng lên 30tr hoặc chọn Gaming."
+        elif muc_dich == "gaming":
+            _err_msg = "Chưa tìm được cấu hình gaming phù hợp. Thử tăng ngân sách thêm 2-3tr."
+        else:
+            _err_msg = "Chưa tìm được cấu hình phù hợp. Thử tăng ngân sách hoặc đổi mục đích sử dụng."
+        st.error(f"❌ {_err_msg}")
         st.session_state.sidebar_result = None
 
 if st.session_state.show_balloons:
@@ -578,9 +598,9 @@ with tab1:
         c4.metric("⭐ A* f-score",  f"{result['f_score']:.4f}",
                   help="f(n) = g(n) + h(n). Càng nhỏ càng tốt.")
 
-        # ── Progress bar ──────────────────────────────────────────
+        # ── Progress bar — dùng màu vàng thay màu đỏ khi vượt ngân sách ──
         prog_val = min(best["total"] / ngan_sach, 1.0)
-        bar_color = "#27ae60" if prog_val < 0.9 else "#e67e22" if prog_val < 1.0 else "#e74c3c"
+        bar_color = "#27ae60" if prog_val < 0.9 else "#e67e22"  # xanh → vàng, không đỏ
         st.markdown(
             f'<div style="margin:12px 0 4px"><strong>Ngân sách đã dùng: {pct_used:.1f}%</strong></div>'
             f'<div class="domain-bar-wrap"><div class="domain-bar" '
@@ -588,9 +608,22 @@ with tab1:
             unsafe_allow_html=True,
         )
 
+        # ── Lọc cooler không tương thích (Intel-only với CPU AMD) ─
+        cpu_socket = best.get("cpu", {}).get("socket", "")
+        cooler = best.get("cooler", {})
+        if cpu_socket in ("AM4", "AM5") and cooler:
+            cooler_name = str(cooler.get("name", "")).lower()
+            if "intel" in cooler_name or "lga" in cooler_name:
+                best["cooler"] = {"name": "Box Cooler (stock)", "price": 0}
+
         # ── Component table ───────────────────────────────────────
         st.markdown("### Chi tiết cấu hình")
         st.markdown(render_config_html(best, ngan_sach), unsafe_allow_html=True)
+
+        # ── Thông báo nhẹ nhàng nếu tổng vượt ngân sách ──────────
+        if best["total"] > ngan_sach:
+            chenh_lech = fmt_vnd(best["total"] - ngan_sach)
+            st.info(f"💡 Cấu hình tốt nhất trong tầm giá của bạn. Tổng giá chênh lệch {chenh_lech} so với ngân sách.")
 
         # ── Pie chart ─────────────────────────────────────────────
         st.markdown("### 🥧 Phân bổ ngân sách thực tế")
@@ -849,10 +882,25 @@ with tab4:
                 )
 
             if chat_result is None:
-                st.error("❌ Không tìm được cấu hình. Thử tăng ngân sách hoặc đổi mục đích.")
+                # Thông báo lỗi thân thiện theo mục đích trong câu chat
+                _chat_muc_dich = facts.get("muc_dich", "")
+                if _chat_muc_dich == "graphics":
+                    _chat_err = "Với ngân sách hiện tại chưa đủ cho cấu hình đồ họa chuyên nghiệp. Gợi ý tăng lên 30tr hoặc chọn Gaming."
+                elif _chat_muc_dich == "gaming":
+                    _chat_err = "Chưa tìm được cấu hình gaming phù hợp. Thử tăng ngân sách thêm 2-3tr."
+                else:
+                    _chat_err = "Chưa tìm được cấu hình phù hợp. Thử tăng ngân sách hoặc đổi mục đích sử dụng."
+                st.error(f"❌ {_chat_err}")
             else:
                 st.success(f"✅ Tìm được **{chat_result['valid_count']}** cấu hình hợp lệ!")
                 best_c = chat_result["best"]
+                # Lọc cooler Intel-only ra khỏi build AMD
+                _c_socket = best_c.get("cpu", {}).get("socket", "")
+                _cooler_c = best_c.get("cooler", {})
+                if _c_socket in ("AM4", "AM5") and _cooler_c:
+                    _cn = str(_cooler_c.get("name", "")).lower()
+                    if "intel" in _cn or "lga" in _cn:
+                        best_c["cooler"] = {"name": "Box Cooler (stock)", "price": 0}
 
                 m1, m2, m3, m4 = st.columns(4)
                 m1.metric("💰 Tổng giá", fmt_vnd(best_c["total"]))
